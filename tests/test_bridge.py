@@ -16,6 +16,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -547,6 +548,67 @@ class EndToEnd(TempHome):
         self.assertTrue(run_bridge("logout")["ok"])
         self.wait_for(lambda: not self.mpv_running())
         self.assertEqual(bridge.load_auth(), {})
+
+
+class AboutTests(TempHome):
+    """The About page's privacy statement (About.js) has to name every host the
+    plugin can reach, so adding one without saying so fails here."""
+
+    # URLs that appear in shipped code but are never requested by the plugin.
+    NOT_CONTACTED = {
+        "github.com": "only part of the User-Agent string",
+    }
+
+    def privacy(self):
+        # The statement is a run of "..." + "..." literals; join them back up.
+        about = (ROOT / "About.js").read_text(encoding="utf-8")
+        block = about[about.index("var PRIVACY"):about.index("function manifestVersion")]
+        block = block[:block.index("\n\n")]
+        return "".join(json.loads(lit) for lit in re.findall(r'"(?:[^"\\]|\\.)*"', block))
+
+    def test_privacy_names_the_bridge_hosts(self):
+        privacy = self.privacy()
+        for url in (bridge.API, bridge.PODCAST_API, bridge.ART_BASE):
+            self.assertIn(urllib.parse.urlsplit(url).hostname, privacy)
+        self.assertIn(bridge.API_HOST, privacy)
+        for host in bridge.SHOW_HOSTS:
+            self.assertIn(host, privacy)
+        # ART_HOST_RE is one exact host, written as a regex.
+        self.assertRegex(bridge.ART_HOST_RE.pattern, r"^\^[a-z\\.]+\$$")
+        self.assertIn(bridge.ART_HOST_RE.pattern[1:-1].replace("\\.", "."), privacy)
+        # Audio is the one thing fetched from elsewhere: by mpv, from the feed.
+        self.assertIn("each podcast's own server", privacy)
+        self.assertIn("No telemetry", privacy)
+
+    def test_privacy_names_every_url_in_shipped_code(self):
+        privacy = self.privacy()
+        hosts = set()
+        for path in sorted(ROOT.rglob("*")):
+            rel = str(path.relative_to(ROOT))
+            if not path.is_file() or rel.startswith((".git", "tests/")) or path.suffix in (".png", ".md"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            hosts.update(re.findall(r"https?://([A-Za-z0-9.-]+)", text))
+        self.assertIn("api.pocketcasts.com", hosts)
+        for host in sorted(hosts):
+            if host in self.NOT_CONTACTED:
+                continue
+            self.assertIn(host, privacy, "%s is reachable but not named in About.js PRIVACY" % host)
+
+    def test_privacy_matches_what_is_kept_and_synced(self):
+        privacy = self.privacy()
+        self.assertIn("~/.local/state/omarchy-pocketcasts/auth.json", privacy)
+        self.assertIn("0600", privacy)
+        self.assertIn("~/.cache/omarchy-pocketcasts/art", privacy)
+        self.assertIn("~/.config/omarchy/shell.json", privacy)
+        self.assertIn("password is never stored", privacy)
+        self.assertIn("every %d seconds" % bridge.SYNC_INTERVAL, privacy)
+        self.assertIn("%d-minute" % (bridge.PODCASTS_CACHE_SECONDS // 60), privacy)
+
+    def test_status_reports_the_python_version(self):
+        result = run_bridge("status")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["python"], "%d.%d.%d" % sys.version_info[:3])
 
 
 if __name__ == "__main__":

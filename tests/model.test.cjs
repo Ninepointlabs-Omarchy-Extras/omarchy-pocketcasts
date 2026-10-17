@@ -122,7 +122,7 @@ test("no environment allow-list carries a code-loading or command variable", () 
 
 test("the QML starts programs only through closed-environment Process objects", () => {
   const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
-  const qml = ["Service.qml", "Panel.qml", "BarWidget.qml"].map((file) => fs.readFileSync(path.join(ROOT, file), "utf8")).join("\n")
+  const qml = ["Service.qml", "Panel.qml", "BarWidget.qml", "AboutView.qml"].map((file) => fs.readFileSync(path.join(ROOT, file), "utf8")).join("\n")
   for (const pattern of [/\bbash\b/, /-lc\b/, /execDetached/, /\.run\(/, /command:\s*\[\s*bridge\b/, /startDetached/]) {
     assert.ok(!pattern.test(qml), String(pattern))
   }
@@ -140,4 +140,59 @@ test("the password travels on stdin, never in argv, and is cleared after use", (
   assert.match(service, /write\(secret\)\s*\n\s*secret = ""\s*\n\s*stdinEnabled = false/)
   assert.match(panel, /password:\s*true/)
   assert.match(panel, /passwordField\.text = ""/)
+})
+
+test("About: facts come from the repo, details and mailto are well formed", () => {
+  const About = require(path.join(ROOT, "About.js"))
+  const manifest = fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8")
+  assert.equal(About.manifestVersion(manifest), JSON.parse(manifest).version)
+  assert.equal(About.manifestVersion("not json"), "")
+  assert.equal(About.manifestVersion('{"version":"1.0 <b>"}'), "")
+  assert.equal(JSON.parse(manifest).author, "Nine Point Labs")
+  assert.equal(About.NAME, JSON.parse(manifest).name)
+  assert.equal(About.ORGANIZATION, "Nine Point Labs")
+  assert.equal(About.SUPPORT_EMAIL, "help@ninepointlabs.com")
+
+  const license = fs.readFileSync(path.join(ROOT, "LICENSE"), "utf8")
+  assert.equal(About.licenseSummary(license), "MIT License, © 2026 Nine Point Labs")
+  const body = About.licenseBody(license)
+  assert.ok(body.startsWith("MIT License\n\nCopyright (c) 2026 Nine Point Labs\n\nPermission"))
+  assert.ok(!body.includes("a copy\nof"))
+
+  assert.equal(About.probedVersion((major, minor) => major === 6 && minor <= 11, 6), "6.11")
+  assert.equal(About.probedVersion((major, minor) => major === 0 && minor <= 3, 0), "0.3")
+  assert.equal(About.probedVersion(() => false, 6), "")
+  assert.equal(About.probedVersion(null, 6), "")
+
+  const versions = { quickshell: "0.3", qt: "6.11", python: "3.14.7" }
+  assert.equal(About.builtWith(versions), "Quickshell 0.3, Qt 6.11, Python 3.14.7 and mpv")
+  assert.equal(About.builtWith({}), "Quickshell, Qt, Python and mpv")
+  const details = About.details("0.1.0", versions, "Hyprland, wayland")
+  assert.equal(details, "Omarchy Pocket Casts plugin 0.1.0\nQuickshell 0.3, Qt 6.11, Python 3.14.7 and mpv\nHyprland, wayland")
+  const mail = About.mailto("0.1.0", details)
+  assert.ok(mail.startsWith("mailto:help@ninepointlabs.com?subject=Omarchy%20Pocket%20Casts%20plugin%200.1.0&body="))
+  assert.ok(decodeURIComponent(mail.split("&body=")[1]).endsWith("Python 3.14.7 and mpv\nHyprland, wayland"))
+})
+
+test("About: the repo spells the company Nine Point Labs", () => {
+  for (const file of ["LICENSE", "manifest.json", "README.md", "About.js", "AboutView.qml", "Panel.qml", "BarWidget.qml", "Service.qml"]) {
+    const text = fs.readFileSync(path.join(ROOT, file), "utf8")
+    assert.ok(!/Ninepoint Labs|NINEPOINT LABS/.test(text), file)
+  }
+})
+
+test("About is reachable from the header, the `i` key and IPC, and resets on close", () => {
+  const panel = fs.readFileSync(path.join(ROOT, "Panel.qml"), "utf8")
+  const widget = fs.readFileSync(path.join(ROOT, "BarWidget.qml"), "utf8")
+  assert.match(panel, /objectName: "aboutButton"[\s\S]*?onClicked: root\.setAbout\(true\)/)
+  assert.match(panel, /t === "i"\) \{ root\.setAbout\(!root\.showAbout\)/)
+  assert.match(panel, /if \(root\.showAbout\) \{ root\.setAbout\(false\); return \}/)
+  assert.match(panel, /if \(!opened\) \{\s*showAbout = false/)
+  assert.match(widget, /function about\(\): void \{ root\.open\(\); if \(panelLoader\.item\) panelLoader\.item\.setAbout\(true\) \}/)
+})
+
+test("install.sh ships the About page and the LICENSE it reads", () => {
+  const install = fs.readFileSync(path.join(ROOT, "install.sh"), "utf8")
+  const list = install.match(/^for entry in (.*); do$/m)[1].split(/\s+/)
+  for (const file of ["About.js", "AboutView.qml", "LICENSE", "manifest.json", "Panel.qml"]) assert.ok(list.includes(file), file)
 })

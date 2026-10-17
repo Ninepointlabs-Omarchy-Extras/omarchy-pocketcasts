@@ -63,6 +63,7 @@ Item {
   // The last episode loaded, remembered by the bridge across shell restarts
   // so the bar chip has a cover before the first poll.
   property var lastItem: ({})
+  property string pythonVersion: ""  // the bridge's interpreter, for the About page
 
   // ---- Sign-in
   property bool loginRunning: false
@@ -316,6 +317,7 @@ Item {
       root.mpvInstalled = d.mpv !== ""
       root.mprisInstalled = d.mpris === true
       root.lastItem = d.last || {}
+      root.pythonVersion = /^[0-9]{1,3}(\.[0-9]{1,3}){1,2}$/.test(String(d.python || "")) ? d.python : ""
       if (root.authenticated || d.running === true) root.refreshPlayer()
       if (root.authenticated) root.loadUpNextIfStale()
     })

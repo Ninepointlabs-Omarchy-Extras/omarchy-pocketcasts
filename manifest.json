@@ -3,7 +3,7 @@
   "id": "ninepointlabs.pocketcasts",
   "name": "Pocket Casts",
   "version": "0.1.0",
-  "author": "Ninepoint Labs",
+  "author": "Nine Point Labs",
   "license": "MIT",
   "description": "Pocket Casts in the Omarchy bar — sign in, play your Up Next, in-progress and new episodes through mpv, browse your shows, and keep your listening position in sync with your phone.",
   "kinds": [

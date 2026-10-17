@@ -77,12 +77,20 @@ Casts every 30 seconds, and again when you pause, stop or switch episodes.
 A finished episode is marked as played. If autoplay is on, the next Up Next
 episode starts after that.
 
+**About:** the 󰋽 button at the top of the panel (or `i` in the panel, or
+`omarchy-shell ninepointlabs.pocketcasts about`) shows the version, the
+license (readable in place), Nine Point Labs, what the plugin does with your
+data, and the support address,
+[help@ninepointlabs.com](mailto:help@ninepointlabs.com), with *Email*, *Copy*
+and *Copy version details* buttons. Back or `Esc` returns to the player.
+
 ### Keybindings
 
 The service listens for IPC commands under the `pocketcasts` target:
 
 ```sh
 omarchy-shell ninepointlabs.pocketcasts toggle   # open/close the panel
+omarchy-shell ninepointlabs.pocketcasts about    # open the panel on its About page
 omarchy-shell pocketcasts playPause
 omarchy-shell pocketcasts status                 # JSON: playing, title, show, position, speed
 ```
