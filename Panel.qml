@@ -7,6 +7,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "About.js" as About
 
 // The Pocket Casts panel: a now-playing hero (cover, progress, skip back /
 // play / skip forward / next, speed, volume) and four tabs — Up Next, In
@@ -48,6 +49,26 @@ Panel {
   property int cursorIndex: -1
   property bool countedOpen: false
   property bool _returnFired: false
+  property bool showAbout: false
+
+  // About page facts, read from this plugin's own files once it is shown.
+  readonly property string pluginDir: {
+    var text = String(Qt.resolvedUrl("."))
+    if (text.indexOf("file://") === 0) text = decodeURIComponent(text.substring(7))
+    return text.length > 1 && text.charAt(text.length - 1) === "/" ? text.substring(0, text.length - 1) : text
+  }
+  FileView { id: manifestFile; path: root.showAbout ? root.pluginDir + "/manifest.json" : "" }
+  FileView { id: licenseFile; path: root.showAbout ? root.pluginDir + "/LICENSE" : "" }
+  readonly property var aboutVersions: ({
+    quickshell: About.probedVersion(function(a, b) { return Quickshell.hasVersion(a, b) }, 0),
+    qt: About.probedVersion(function(a, b) { return Quickshell.hasQtVersion(a, b) }, 6),
+    python: service ? service.pythonVersion : ""
+  })
+
+  function setAbout(on) {
+    showAbout = !!on
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
 
   readonly property bool authenticated: service ? service.authenticated === true : false
   readonly property bool needsSetup: service && service.probed && !authenticated
@@ -216,6 +237,7 @@ Panel {
   onOpenedChanged: {
     noteOpen(opened)
     if (!opened) {
+      showAbout = false
       if (service) service.closeDetail()
       passwordField.text = ""
       return
@@ -319,7 +341,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(470))
-    contentHeight: panel.fittedContentHeight(
+    contentHeight: panel.fittedContentHeight(root.showAbout ? aboutView.implicitHeight :
       fixedContent.implicitHeight + content.spacing + (root.needsSetup ? 0 : Math.max(Style.space(180), listColumn.implicitHeight + Style.space(6))),
       Style.space(760))
 
@@ -328,22 +350,26 @@ Panel {
       anchors.fill: parent
       blocked: emailField.activeFocus || passwordField.activeFocus
       onMoveRequested: function(dx, dy) {
+        if (root.showAbout) return
         if (dy !== 0) root.moveCursor(dy)
         else if (dx < 0 && root.detailOpen) root.goBack()
         else if (dx !== 0 && !root.detailOpen) root.stepTab(dx)
       }
-      onReturnRequested: { root._returnFired = true; root.activateRow(root.cursorIndex) }
+      onReturnRequested: { if (root.showAbout) return; root._returnFired = true; root.activateRow(root.cursorIndex) }
       onActivateRequested: {
+        if (root.showAbout) return
         if (root._returnFired) { root._returnFired = false; return }
         if (root.service) root.service.playPause()
       }
       onCloseRequested: {
+        if (root.showAbout) { root.setAbout(false); return }
         if (root.goBack()) return
         root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (!root.service || !root.authenticated) return
+        if (t === "i") { root.setAbout(!root.showAbout); return }
+        if (!root.service || !root.authenticated || root.showAbout) return
         if (t === "1") root.setTab("upnext")
         else if (t === "2") root.setTab("progress")
         else if (t === "3") root.setTab("new")
@@ -360,8 +386,28 @@ Panel {
         else if (t === "-") root.service.nudgeVolume(-5)
       }
 
+      // Swapped in for everything below by the header's info button, `i`,
+      // or the `about` IPC call; Back, Esc or closing the panel leaves it.
+      AboutView {
+        id: aboutView
+        objectName: "aboutView"
+        visible: root.showAbout
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        foreground: root.foreground
+        accent: root.accent
+        fontFamily: root.fontFamily
+        icon: Model.glyph.pocketcasts
+        version: About.manifestVersion(manifestFile.loaded ? manifestFile.text() : "")
+        licenseText: licenseFile.loaded ? licenseFile.text() : ""
+        versions: root.aboutVersions
+        onBackRequested: root.setAbout(false)
+      }
+
       ColumnLayout {
         id: content
+        visible: !root.showAbout
         anchors.fill: parent
         spacing: Style.space(10)
 
@@ -422,6 +468,15 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(4)
+
+              PanelActionButton {
+                objectName: "aboutButton"
+                iconText: "󰋽"
+                tooltipText: "About (i)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.setAbout(true)
+              }
 
               PanelActionButton {
                 visible: root.authenticated

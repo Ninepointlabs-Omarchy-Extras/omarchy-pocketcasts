@@ -108,6 +108,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function about(): void { root.open(); if (panelLoader.item) panelLoader.item.setAbout(true) }
     function isOpen(): string { return root.anyOpened() ? "true" : "false" }
     function refresh(): void { root.broadcast("refresh") }
     function playPause(): string { return root.service && root.service.playPause() ? "ok" : "unhandled" }

@@ -1598,6 +1598,7 @@ def cmd_status(args):
         "mpris": bool(mpris_script()),
         "running": Mpv.connect(timeout=0.5) is not None,
         "last": chip_item(episode),
+        "python": "%d.%d.%d" % sys.version_info[:3],  # for the About page
     })
 
 
