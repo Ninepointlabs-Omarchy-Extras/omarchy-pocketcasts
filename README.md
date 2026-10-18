@@ -28,7 +28,7 @@ window.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/ninepointlabs/omarchy-pocketcasts.git --enable
+omarchy plugin add https://github.com/Ninepointlabs-Omarchy-Extras/omarchy-pocketcasts.git --enable
 ```
 
 The chip appears in the right section of the bar.
@@ -36,7 +36,7 @@ The chip appears in the right section of the bar.
 To work from a checkout instead:
 
 ```sh
-git clone https://github.com/ninepointlabs/omarchy-pocketcasts ~/Projects/omarchy-pocketcasts
+git clone https://github.com/Ninepointlabs-Omarchy-Extras/omarchy-pocketcasts ~/Projects/omarchy-pocketcasts
 ~/Projects/omarchy-pocketcasts/install.sh          # adds the widget to the right of the bar
 ~/Projects/omarchy-pocketcasts/install.sh center   # or pick a section
 ```
