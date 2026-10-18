@@ -59,7 +59,7 @@ from concurrent.futures import ThreadPoolExecutor
 API = "https://api.pocketcasts.com"
 PODCAST_API = "https://podcast-api.pocketcasts.com"
 ART_BASE = "https://static.pocketcasts.com/discover/images"
-USER_AGENT = "omarchy-pocketcasts/0.1 (+https://github.com/ninepointlabs/omarchy-pocketcasts)"
+USER_AGENT = "omarchy-pocketcasts/0.1 (+https://github.com/Ninepointlabs-Omarchy-Extras/omarchy-pocketcasts)"
 
 HTTP_TIMEOUT = 15
 ART_TIMEOUT = 8
