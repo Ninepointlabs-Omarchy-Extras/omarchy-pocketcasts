@@ -21,7 +21,9 @@ Audio plays in mpv, started detached by this script and driven over its JSON
 IPC socket in $XDG_RUNTIME_DIR/omarchy-pocketcasts/ (0700). Playback outlives
 the shell; every `player` poll pushes the listening position back to Pocket
 Casts so your phone picks up where this machine left off, and the other way
-round. When mpv-mpris is installed, media keys and playerctl see it too.
+round: before a paused episode plays again, Pocket Casts is asked where you
+are, so a resume here never rewinds what you heard elsewhere (check_server).
+When mpv-mpris is installed, media keys and playerctl see it too.
 
 Trust boundaries: the bridge runs under an isolated interpreter
 (`/usr/bin/python3 -I`) with a scrubbed environment; mpv is an absolute path
@@ -92,6 +94,13 @@ STATUS_PLAYED = 3
 
 # Push the position to Pocket Casts at most this often while playing.
 SYNC_INTERVAL = 30
+# Pocket Casts and this machine agree on a position to within this many
+# seconds; a bigger gap means another device moved it.
+DRIFT_SLACK = 3
+# While playing, this long since the last push means playback was
+# interrupted (paused from a media key, the machine slept, the shell was
+# down), so Pocket Casts is asked where things stand before the next push.
+RECHECK_AFTER = 90
 # Within this many seconds of the end counts as finished.
 FINISH_SLACK = 3
 # Extra mpv arguments; the test suite sets --ao=null here.
@@ -1126,7 +1135,8 @@ def up_next_episode_body(item):
 def up_next_put(item, where):
     """Queue an episode: "now" (top of Up Next, where Pocket Casts keeps what
     is playing), "next" or "last". Pocket Casts' web player uses play_now for
-    the first; if the server refuses it, play_next is the closest stand-in."""
+    the first; if the server refuses it, play_next is the closest stand-in.
+    True when the episode went where it was asked to."""
     endpoint = {"now": "/up_next/play_now", "next": "/up_next/play_next", "last": "/up_next/play_last"}[where]
     body = {"version": 2, "episode": up_next_episode_body(item)}
     try:
@@ -1134,8 +1144,21 @@ def up_next_put(item, where):
     except ApiError as err:
         if where == "now" and err.status in (400, 404, 405):
             api("/up_next/play_next", body)
-        else:
-            raise
+            return False
+        raise
+    return True
+
+
+def up_next_top():
+    """The episode at the top of Up Next (where Pocket Casts keeps the one
+    playing on whichever device played last), or None when it is empty."""
+    episodes, sync = up_next_raw()
+    for e in episodes:
+        uuid = str((e or {}).get("uuid") or "").lower()
+        item = norm_episode(e, sync=sync.get(uuid))
+        if item:
+            return item
+    return None
 
 
 def up_next_remove(uuids):
@@ -1408,30 +1431,36 @@ def load_into_mpv(item, prefs, position):
         player.wait_for_load()
 
 
-def play_item(item, prefs, from_start=False, queue=True):
+def play_item(item, prefs, from_start=False, queue=True, save_previous=True, at_top=False):
     """Load `item` and record it as what's playing. Pocket Casts keeps the
-    playing episode at the top of Up Next, so it goes there too."""
+    playing episode at the top of Up Next, so it goes there too (`queue`);
+    callers that took `item` from the top of Up Next say so with `at_top`.
+
+    `save_previous=False` is for a switch Pocket Casts itself asked for
+    (another device moved on): the outgoing episode's local position is out
+    of date then, and pushing it would rewind that device."""
     position = start_position(item, from_start)
     previous = load_playback()
     current = previous.get("episode") or {}
     # Switching away mid-episode: save where you were in the old one (unless
     # it just finished, which already marked it played).
-    if (current.get("uuid") and current.get("uuid") != item.get("uuid")
-            and previous.get("handledEnd") != current.get("uuid") and previous.get("position") is not None):
-        try:
-            push_position(current, as_int(previous.get("position")))
-        except ApiError:
-            pass
+    if (save_previous and current.get("uuid") and current.get("uuid") != item.get("uuid")
+            and previous.get("handledEnd") != current.get("uuid")):
+        save_outgoing(previous)
     load_into_mpv(item, prefs, position)
     cache_art([item])
+    # atTop: whether this episode is the top of Up Next, i.e. what Pocket
+    # Casts considers playing. If the top later changes, another device has
+    # moved on to something else (see check_server).
     state = {"episode": chip_item(item), "lastSyncAt": time.time(), "lastSyncPos": position,
-             "position": position, "handledEnd": ""}
+             "position": position, "handledEnd": "", "atTop": bool(at_top)}
     save_playback(state)
     if queue:
         try:
-            up_next_put(item, "now")
+            state["atTop"] = up_next_put(item, "now")
         except ApiError:
             pass
+        save_playback(state)
     try:
         push_position(item, position)
     except ApiError:
@@ -1492,7 +1521,99 @@ def finish_current(state, prefs, autoplay):
     item = next_in_up_next(episode.get("uuid", ""))
     if not item:
         return state
-    return play_item(item, prefs, queue=False)
+    return play_item(item, prefs, queue=False, at_top=True)
+
+
+# Resuming is where devices meet: this machine paused an episode, you carried
+# on listening on your phone, and now this machine is about to play again from
+# where *it* stopped. Pocket Casts is asked first, every time, and its answer
+# wins: further into the episode (seek there), finished and on to the next one
+# (play that), or nothing left (stop). Without this, the next position push
+# rewinds the phone to where this machine paused.
+
+def check_server(state, prefs, player=None):
+    """Bring the loaded episode in line with Pocket Casts before it plays on.
+
+    Returns (outcome, state) with outcome one of:
+      "same"       carry on with this episode, seeked to Pocket Casts'
+                   position if another device moved it;
+      "switched"   another device moved on to a different episode, which is
+                   now loaded and playing;
+      "finished"   another device finished this episode and Up Next is
+                   empty; the player is stopped;
+      "unverified" Pocket Casts could not be asked; nothing changed.
+    """
+    episode = state.get("episode") or {}
+    uuid = episode.get("uuid")
+    if not uuid:
+        return "same", state
+    try:
+        top = up_next_top()
+        record = user_episode(uuid)
+    except ApiError:
+        return "unverified", state
+    finished = as_int(record.get("playingStatus")) == STATUS_PLAYED
+    moved_on = top is not None and top["uuid"] != uuid and (finished or state.get("atTop") is True)
+    if moved_on:
+        try:
+            item = resolve_episode(top["uuid"], top.get("podcast", ""))
+        except ApiError:
+            return "unverified", state
+        return "switched", play_item(item, prefs, queue=False, save_previous=False, at_top=True)
+    if finished:
+        own = player is None
+        player = player or Mpv.connect()
+        if player:
+            quit_mpv(player)
+            if own:
+                player.close()
+        state["handledEnd"] = uuid
+        state["checkServer"] = False
+        save_playback(state)
+        return "finished", state
+
+    if record:
+        server = as_int(record.get("playedUpTo"))
+        pushed = float(state.get("lastSyncPos") or 0)
+        local = float(state.get("position") or 0)
+        # Keep a local position Pocket Casts never received (its push failed)
+        # when it is further on than what another device saved.
+        keep_local = moved_since_push(state) and local > server
+        if abs(server - pushed) > DRIFT_SLACK and not keep_local:
+            own = player is None
+            player = player or Mpv.connect()
+            if player:
+                try:
+                    player.command("seek", server, "absolute")
+                finally:
+                    if own:
+                        player.close()
+            state["position"] = float(server)
+            state["lastSyncPos"] = float(server)
+            episode["playedUpTo"] = server
+    state["checkServer"] = False
+    state["lastSyncAt"] = time.time()
+    save_playback(state)
+    return "same", state
+
+
+def resume_loaded(player, state, prefs):
+    """Unpause the loaded episode once Pocket Casts has said what should play
+    and from where. Raises when another device finished it and nothing is
+    left to play."""
+    if player.get("pause") is False:
+        return  # already playing (a media key got there first)
+    if player.get("eof-reached") is True:
+        # It played to its end here (autoplay off): play it again.
+        player.command("seek", 0, "absolute")
+        player.set("pause", False)
+        return
+    outcome, state = check_server(state, prefs, player)
+    if outcome == "switched":
+        return
+    if outcome == "finished":
+        raise ApiError("finished_elsewhere", "Finished on another device, and Up Next is empty")
+    player.set("pause", False)
 
 
 def poll(autoplay=True):
@@ -1517,10 +1638,27 @@ def poll(autoplay=True):
         state = finish_current(state, prefs, autoplay)
         return poll_after_change(state, prefs)
     now = time.time()
+    if snap.get("pause") is True:
+        # Whoever paused it (this panel, a media key, playerctl), the next
+        # resume asks Pocket Casts first.
+        state["checkServer"] = True
+    elif snap.get("pause") is False and (state.get("checkServer")
+                                         or now - float(state.get("lastSyncAt") or 0) >= RECHECK_AFTER):
+        # Playing again without a resume through this bridge (a media key,
+        # playerctl), or after an interruption (the machine slept): another
+        # device may have moved on meanwhile, so ask before pushing anything.
+        outcome, state = check_server(state, prefs)
+        if outcome in ("switched", "finished"):
+            return poll_after_change(state, prefs)
+        if outcome == "unverified":
+            state["checkServer"] = True  # no push until Pocket Casts answers
+            save_playback(state)
+            return player_view(snap, state, prefs)
+        return poll_after_change(state, prefs)
     due = False
     if snap.get("pause") is False and now - float(state.get("lastSyncAt") or 0) >= SYNC_INTERVAL:
         due = True
-    elif snap.get("pause") is True and abs(float(state.get("position") or 0) - float(state.get("lastSyncPos") or 0)) >= 1:
+    elif snap.get("pause") is True and moved_since_push(state):
         due = True
     if due and isinstance(position, (int, float)):
         try:
@@ -1542,13 +1680,26 @@ def poll_after_change(state, prefs):
         return player_view(player.snapshot(), state, prefs)
 
 
-def sync_now(player, state):
-    """Push the current position right away (after a pause, seek or stop)."""
+def moved_since_push(state):
+    """True when the loaded episode's position has moved since it was last
+    pushed to Pocket Casts."""
+    return abs(float(state.get("position") or 0) - float(state.get("lastSyncPos") or 0)) >= 1
+
+
+def sync_now(player, state, force=False):
+    """Push the current position right away. A pause or a seek (`force`)
+    always pushes. Otherwise (stop, skip, switching episodes) a paused
+    episode is pushed only if it moved since its last push: an untouched
+    paused position is old news, another device may have carried on from it
+    since, and pushing it again would rewind that device."""
     episode = state.get("episode") or {}
     position = player.get("time-pos")
     if not episode.get("uuid") or not isinstance(position, (int, float)):
         return
     state["position"] = float(position)
+    if not force and player.get("pause") is True and not moved_since_push(state):
+        save_playback(state)
+        return
     try:
         push_position(episode, position)
         state["lastSyncAt"] = time.time()
@@ -1556,6 +1707,19 @@ def sync_now(player, state):
     except ApiError:
         pass
     save_playback(state)
+
+
+def save_outgoing(state):
+    """Before another episode replaces the loaded one, push where the loaded
+    one got to, by the same rule as sync_now. With no player to ask, nothing
+    is pushed: the episode's last push stands."""
+    url = (state.get("episode") or {}).get("url") or ""
+    player = Mpv.connect()
+    if not player:
+        return
+    with player:
+        if url and player.get("path") == url:
+            sync_now(player, state)
 
 
 def quit_mpv(player):
@@ -1667,7 +1831,9 @@ def cmd_play(args):
 def resume_last(prefs):
     """Nothing is loaded (mpv was closed, or the machine restarted): pick up
     the last episode where Pocket Casts says you left it, else the top of Up
-    Next."""
+    Next. Another device may have finished it or moved on to something else
+    since; then the top of Up Next is what plays, and the last episode is
+    neither restarted nor queued again."""
     state = load_playback()
     episode = state.get("episode") or {}
     item = None
@@ -1676,11 +1842,21 @@ def resume_last(prefs):
             item = resolve_episode(episode["uuid"], episode.get("podcast", ""))
         except ApiError:
             item = None
+        if item and item.get("status") == STATUS_PLAYED:
+            item = None
+        if item and state.get("atTop") is True:
+            try:
+                top = up_next_top()
+            except ApiError:
+                top = None
+            if top and top["uuid"] != item["uuid"]:
+                item = None
     if not item:
         item = next_in_up_next("")
     if not item:
         raise ApiError("nothing_queued", "Up Next is empty — pick an episode to play")
-    play_item(item, prefs)
+    # The old local position is stale here by definition: never push it.
+    play_item(item, prefs, save_previous=False)
 
 
 def cmd_toggle(args):
@@ -1694,12 +1870,13 @@ def cmd_toggle(args):
                 idle = player.get("idle-active") is True or not player.get("path")
                 if not idle:
                     if args.action == "pause" or (args.action == "toggle" and player.get("pause") is False):
+                        was_playing = player.get("pause") is False
                         player.set("pause", True)
-                        sync_now(player, state)
+                        state["checkServer"] = True
+                        # Pausing what was already paused sends nothing new.
+                        sync_now(player, state, force=was_playing)
                     else:
-                        if player.get("eof-reached") is True:
-                            player.command("seek", 0, "absolute")
-                        player.set("pause", False)
+                        resume_loaded(player, state, prefs)
         if idle and args.action != "pause":
             resume_last(prefs)
         view = poll_after_change(load_playback(), prefs)
@@ -1715,7 +1892,7 @@ def cmd_seek(args):
             else:
                 player.command("seek", max(0.0, float(args.seconds)), "absolute")
             time.sleep(0.05)
-            sync_now(player, state)
+            sync_now(player, state, force=True)
         view = poll_after_change(load_playback(), load_prefs())
     out(view)
 

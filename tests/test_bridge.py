@@ -270,12 +270,22 @@ class FakePocketCasts(http.server.BaseHTTPRequestHandler):
         s = self.state
         path = urllib.parse.urlsplit(self.path).path
         if path.startswith("/audio/"):
+            # Byte ranges, as real podcast hosts serve them, so mpv can start
+            # a freshly loaded episode part way through.
             blob = s["audio"]
-            self.send_response(200)
+            wanted = re.match(r"bytes=(\d+)-(\d*)$", self.headers.get("Range") or "")
+            first, last = 0, len(blob) - 1
+            if wanted:
+                first = int(wanted.group(1))
+                last = min(int(wanted.group(2) or last), last)
+            self.send_response(206 if wanted else 200)
             self.send_header("Content-Type", "audio/mpeg")
-            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Accept-Ranges", "bytes")
+            if wanted:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (first, last, len(blob)))
+            self.send_header("Content-Length", str(last - first + 1))
             self.end_headers()
-            self.wfile.write(blob)
+            self.wfile.write(blob[first:last + 1])
             return
         if path.startswith("/podcast/full/"):
             uuid = path.rsplit("/", 1)[1]
@@ -359,13 +369,18 @@ def make_audio(seconds):
     return blob
 
 
-@unittest.skipUnless(os.path.exists("/usr/bin/mpv") and os.path.exists("/usr/bin/ffmpeg"), "needs mpv and ffmpeg")
-class EndToEnd(TempHome):
-    """Every subcommand against the fake server, with a real (muted) mpv."""
+NEEDS_PLAYER = unittest.skipUnless(os.path.exists("/usr/bin/mpv") and os.path.exists("/usr/bin/ffmpeg"),
+                                   "needs mpv and ffmpeg")
+
+
+class PlayerTestCase(TempHome):
+    """The fake server and a real (muted) mpv, for tests that play audio."""
+
+    AUDIO_SECONDS = 4
 
     @classmethod
     def setUpClass(cls):
-        cls.audio = make_audio(4)
+        cls.audio = make_audio(cls.AUDIO_SECONDS)
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakePocketCasts)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -436,6 +451,11 @@ class EndToEnd(TempHome):
                 return value
             time.sleep(0.2)
         self.fail("timed out")
+
+
+@NEEDS_PLAYER
+class EndToEnd(PlayerTestCase):
+    """Every subcommand against the fake server, with a real (muted) mpv."""
 
     def test_wrong_password_is_reported_and_nothing_is_stored(self):
         result = run_bridge("login", stdin=json.dumps({"email": "me@example.com", "password": "nope"}))
@@ -548,6 +568,160 @@ class EndToEnd(TempHome):
         self.assertTrue(run_bridge("logout")["ok"])
         self.wait_for(lambda: not self.mpv_running())
         self.assertEqual(bridge.load_auth(), {})
+
+
+@NEEDS_PLAYER
+class ResumeAsksPocketCastsFirst(PlayerTestCase):
+    """You pause here, listen on in another device (simulated by writing to
+    the fake server, as that device's app would), then play here again. The
+    episode, position and Up Next another device left behind must win, and
+    this machine must never push its old position over them."""
+
+    AUDIO_SECONDS = 120
+
+    def setUp(self):
+        super().setUp()
+        for episode in self.fake["episodes"].values():
+            episode["duration"] = self.AUDIO_SECONDS
+
+    def other_device(self, uuid, position, status=bridge.STATUS_IN_PROGRESS):
+        self.fake["progress"][uuid] = position
+        self.fake["status"][uuid] = status
+
+    def age_last_push(self, seconds):
+        state = bridge.load_playback()
+        state["lastSyncAt"] = float(state.get("lastSyncAt") or time.time()) - seconds
+        bridge.save_playback(state)
+
+    def pushes(self, uuid):
+        return [body for body in self.writes("/sync/update_episode") if body["uuid"] == uuid]
+
+    def position(self):
+        return run_bridge("player")["data"]["position"]
+
+    def play_then_pause(self, uuid=EP_1, podcast=PODCAST_A):
+        self.login()
+        self.assertTrue(run_bridge("play", uuid, "--podcast", podcast)["ok"])
+        self.wait_for(lambda: self.position() > 0.5)
+        self.assertFalse(run_bridge("pause")["data"]["playing"])
+
+    def mpv_set_pause(self, paused):
+        """What mpv-mpris does for a media key or playerctl: straight to mpv."""
+        with bridge.Mpv.connect() as player:
+            player.set("pause", paused)
+
+    def test_a_resume_with_no_other_device_carries_on_here(self):
+        self.play_then_pause()
+        paused_at = self.position()
+        view = run_bridge("resume")["data"]
+        self.assertTrue(view["playing"])
+        self.assertLess(abs(view["position"] - paused_at), 2)
+
+    def test_resume_seeks_to_where_another_device_left_off(self):
+        self.play_then_pause()
+        self.other_device(EP_1, 60)
+        self.age_last_push(600)  # back here ten minutes later
+        before = len(self.pushes(EP_1))
+        view = run_bridge("resume")["data"]
+        self.assertTrue(view["playing"])
+        self.wait_for(lambda: self.position() >= 59)
+        run_bridge("player")  # the next poll
+        self.assertGreaterEqual(self.fake["progress"][EP_1], 59)
+        self.assertTrue(all(body["position"] >= 59 for body in self.pushes(EP_1)[before:]))
+
+    def test_a_media_key_resume_is_checked_too(self):
+        self.play_then_pause()
+        self.other_device(EP_1, 60)
+        self.age_last_push(600)
+        self.mpv_set_pause(False)
+        self.wait_for(lambda: self.position() >= 59)
+        self.assertGreaterEqual(self.fake["progress"][EP_1], 59)
+
+    def test_media_key_pause_and_resume_are_checked(self):
+        self.login()
+        run_bridge("play", EP_1, "--podcast", PODCAST_A)
+        self.wait_for(lambda: self.position() > 0.5)
+        self.mpv_set_pause(True)
+        run_bridge("player")  # a poll notices the pause
+        self.other_device(EP_1, 60)
+        self.mpv_set_pause(False)  # a minute later, not ten: no gap to go on
+        self.wait_for(lambda: self.position() >= 59)
+        self.assertGreaterEqual(self.fake["progress"][EP_1], 59)
+
+    def test_waking_from_sleep_mid_episode_is_checked(self):
+        self.login()
+        run_bridge("play", EP_1, "--podcast", PODCAST_A)
+        self.wait_for(lambda: self.position() > 0.5)
+        # The machine slept while playing; the phone carried on from here.
+        self.other_device(EP_1, 60)
+        self.age_last_push(600)
+        self.wait_for(lambda: self.position() >= 59)
+        self.assertGreaterEqual(self.fake["progress"][EP_1], 59)
+
+    def test_resume_follows_another_device_to_the_next_episode(self):
+        self.play_then_pause()
+        # On the phone: One played to its end, and Up Next moved on to Two.
+        self.other_device(EP_1, 0, bridge.STATUS_PLAYED)
+        self.fake["upnext"] = [EP_2]
+        self.other_device(EP_2, 20)
+        before = len(self.pushes(EP_1))
+        view = run_bridge("resume")["data"]
+        self.assertEqual(view["item"]["uuid"], EP_2)
+        self.wait_for(lambda: self.position() >= 19)
+        self.assertEqual(self.pushes(EP_1)[before:], [])
+        self.assertEqual(self.fake["status"][EP_1], bridge.STATUS_PLAYED)
+        self.assertEqual(self.fake["upnext"], [EP_2])
+
+    def test_resume_follows_another_device_to_a_different_episode(self):
+        self.play_then_pause()
+        # On the phone: Three started part way through One.
+        self.other_device(EP_1, 45)
+        self.fake["upnext"] = [EP_3, EP_1, EP_2]
+        self.other_device(EP_3, 30)
+        before = len(self.pushes(EP_1))
+        view = run_bridge("resume")["data"]
+        self.assertEqual(view["item"]["uuid"], EP_3)
+        self.wait_for(lambda: self.position() >= 29)
+        self.assertEqual(self.pushes(EP_1)[before:], [])
+        self.assertEqual(self.fake["progress"][EP_1], 45)
+
+    def test_resume_when_another_device_finished_everything(self):
+        self.play_then_pause()
+        self.other_device(EP_1, 0, bridge.STATUS_PLAYED)
+        self.fake["upnext"] = []
+        result = run_bridge("resume")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "finished_elsewhere")
+        self.wait_for(lambda: not self.mpv_running())
+        self.assertEqual(self.fake["status"][EP_1], bridge.STATUS_PLAYED)
+        # Nor does playing again from nothing start it over.
+        self.assertEqual(run_bridge("toggle")["code"], "nothing_queued")
+        self.assertEqual(self.fake["status"][EP_1], bridge.STATUS_PLAYED)
+
+    def test_stop_and_switching_leave_a_paused_position_alone(self):
+        self.play_then_pause()
+        self.other_device(EP_1, 60)
+        run_bridge("play", EP_3, "--podcast", PODCAST_B)  # switch episodes here
+        self.assertEqual(self.fake["progress"][EP_1], 60)
+        self.wait_for(lambda: self.position() > 0.5)
+        run_bridge("pause")
+        self.other_device(EP_3, 30)
+        run_bridge("pause")  # pausing what is already paused sends nothing
+        self.assertEqual(self.fake["progress"][EP_3], 30)
+        run_bridge("stop")
+        self.assertEqual(self.fake["progress"][EP_3], 30)
+
+    def test_a_stopped_player_skips_an_episode_finished_elsewhere(self):
+        self.play_then_pause()
+        run_bridge("stop")
+        self.other_device(EP_1, 0, bridge.STATUS_PLAYED)
+        self.fake["upnext"] = [EP_2]
+        self.other_device(EP_2, 20)
+        view = run_bridge("toggle")["data"]
+        self.assertEqual(view["item"]["uuid"], EP_2)
+        self.wait_for(lambda: self.position() >= 19)
+        self.assertNotIn(EP_1, self.fake["upnext"])
+        self.assertEqual(self.fake["status"][EP_1], bridge.STATUS_PLAYED)
 
 
 class AboutTests(TempHome):
