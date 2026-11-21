@@ -77,6 +77,13 @@ Casts every 30 seconds, and again when you pause, stop or switch episodes.
 A finished episode is marked as played. If autoplay is on, the next Up Next
 episode starts after that.
 
+**Resources:** the plugin starts no process while paused or idle. While an
+episode plays, it runs the bridge once every 30 seconds to send your
+position; everything else (pause, resume, seeks, the end of an episode)
+arrives as an event from mpv. After `unloadAfterMinutes` paused (15 by
+default) the player is closed altogether and the bar chip goes back to its
+icon; play picks up from wherever Pocket Casts says you are.
+
 Before a paused episode plays again (from the panel, a media key or
 `playerctl`, or when the machine wakes up mid-episode), the plugin asks
 Pocket Casts where you are. If you listened on in another device meanwhile,
@@ -122,6 +129,7 @@ The commands are `playPause`, `next`, `skipBack`, `skipForward`, `stop`,
 | `skipBack`      | `10`     | Seconds to skip back                                      |
 | `skipForward`   | `30`     | Seconds to skip forward                                   |
 | `autoplay`      | `true`   | Play the next Up Next episode when one finishes           |
+| `unloadAfterMinutes` | `15` | Close the player after this many minutes paused; `0` keeps it loaded until you stop it |
 
 ## Privacy and security
 

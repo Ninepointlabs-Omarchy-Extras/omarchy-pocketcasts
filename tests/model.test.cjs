@@ -132,6 +132,27 @@ test("the QML starts programs only through closed-environment Process objects", 
   assert.equal(closed, processes)
 })
 
+test("nothing runs on a timer while paused or idle; while playing, polls are sync-paced", () => {
+  const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
+  // Every Timer block, with its running condition and interval.
+  const timers = []
+  const re = /Timer\s*\{([\s\S]*?)\n  \}/g
+  let match
+  while ((match = re.exec(service)) !== null) timers.push(match[1])
+  assert.ok(timers.length >= 4)
+  for (const body of timers) {
+    if (!/repeat:\s*true/.test(body)) continue
+    const running = (body.match(/running:\s*(.+)/) || [])[1] || ""
+    assert.match(running, /root\.isPlaying/, "a repeating timer must stop when playback does: " + running)
+  }
+  const poll = timers.find((body) => /id:\s*pollTimer/.test(body))
+  assert.ok(poll, "pollTimer")
+  assert.ok(Number((poll.match(/interval:\s*(\d+)/) || [])[1]) >= 30000, "polls no faster than the bridge syncs")
+  // Player state arrives as mpv events instead.
+  assert.match(service, /Socket\s*\{/)
+  assert.match(service, /observe_property/)
+})
+
 test("the password travels on stdin, never in argv, and is cleared after use", () => {
   const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
   const panel = fs.readFileSync(path.join(ROOT, "Panel.qml"), "utf8")

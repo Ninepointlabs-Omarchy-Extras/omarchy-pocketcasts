@@ -562,6 +562,23 @@ class EndToEnd(PlayerTestCase):
         self.assertEqual(mode_of(runtime), 0o700)
         self.assertTrue(stat.S_ISSOCK(os.lstat(os.path.join(runtime, "mpv.sock")).st_mode))
 
+    def test_status_names_the_socket_the_panel_listens_on(self):
+        socket_path = run_bridge("status")["data"]["socket"]
+        runtime = os.path.join(os.environ["XDG_RUNTIME_DIR"], "omarchy-pocketcasts")
+        self.assertEqual(socket_path, os.path.join(runtime, "mpv.sock"))
+        self.assertEqual(mode_of(runtime), 0o700)
+
+    def test_idle_unload_never_stops_a_playing_episode(self):
+        self.login()
+        run_bridge("play", EP_1, "--podcast", PODCAST_A)
+        self.wait_for(lambda: run_bridge("player")["data"]["position"] > 0.5)
+        view = run_bridge("stop", "--if-paused")["data"]
+        self.assertTrue(view["playing"])
+        self.assertTrue(self.mpv_running())
+        run_bridge("pause")
+        self.assertFalse(run_bridge("stop", "--if-paused")["data"]["active"])
+        self.assertFalse(self.mpv_running())
+
     def test_logout_stops_the_player_and_forgets_tokens(self):
         self.login()
         run_bridge("play", EP_1, "--podcast", PODCAST_A)
