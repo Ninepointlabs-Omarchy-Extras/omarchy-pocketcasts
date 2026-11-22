@@ -291,6 +291,24 @@ Item {
     actionStatusTimer.restart()
   }
 
+  // An error from an action you took with the panel closed (middle-click,
+  // a keybind) would otherwise go unseen: show it on the shell's OSD too.
+  function reportError(text) {
+    flash(text, true)
+    if (!panelOpen && shell && typeof shell.summon === "function")
+      shell.summon("omarchy.osd", JSON.stringify({ icon: "media", message: text, duration: 4000 }))
+  }
+
+  // An episode whose audio never arrives (its server is down, say) must not
+  // sit there looking like it plays in silence. mpv's end-file error event
+  // and the next poll can both report the same failure: say it once.
+  property double _loadFailedAt: 0
+  function loadFailed(detail) {
+    if (Date.now() - _loadFailedAt < 10000) return
+    _loadFailedAt = Date.now()
+    reportError("Couldn't load this episode's audio" + (detail ? " (" + detail + ")" : ""))
+  }
+
   Timer {
     id: actionStatusTimer
     interval: 3500
@@ -427,6 +445,7 @@ Item {
       inProgressLoadedAt = 0
       if (panelOpen) loadUpNext()
     }
+    if (player.loadFailed === true) loadFailed("")
     syncPlayerEvents()
   }
 
@@ -496,6 +515,11 @@ Item {
     // property-change: one of the observed properties (its first value
     // arrives right after observe_property). playback-restart: a seek (from
     // here, a media widget or playerctl) or a new file has settled.
+    if (message.event === "end-file" && message.reason === "error") {
+      loadFailed(typeof message.file_error === "string" ? message.file_error : "")
+      settle()
+      return
+    }
     if (message.event === "property-change" || message.event === "playback-restart") settle()
   }
 
@@ -573,7 +597,7 @@ Item {
       root.actionRunning = false
       if (!result.ok) {
         if (root.absorbAuthError(result)) return
-        root.flash(result.error, true)
+        root.reportError(result.error)
         root.settle()
         return
       }

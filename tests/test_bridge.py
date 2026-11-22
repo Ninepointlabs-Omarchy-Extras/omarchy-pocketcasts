@@ -579,6 +579,25 @@ class EndToEnd(PlayerTestCase):
         self.assertFalse(run_bridge("stop", "--if-paused")["data"]["active"])
         self.assertFalse(self.mpv_running())
 
+    def test_audio_that_never_loads_is_reported_and_the_player_closed(self):
+        self.login()
+        run_bridge("play", EP_1, "--podcast", PODCAST_A)
+        self.wait_for(lambda: run_bridge("player")["data"]["position"] > 0.5)
+        state = bridge.load_playback()
+        state["checkServer"] = True  # an idle player must not resume or switch either
+        bridge.save_playback(state)
+        before = len(self.fake["log"])
+        # The episode's server stops answering: mpv gives up on the stream
+        # and goes idle, still listing it.
+        with bridge.Mpv.connect() as player:
+            player.command("loadfile", "http://127.0.0.1:1/gone.mp3", "replace")
+        view = self.wait_for(lambda: (lambda v: v if v.get("loadFailed") else None)(run_bridge("player")["data"]))
+        self.assertFalse(view["active"])
+        self.assertFalse(self.mpv_running())
+        self.assertEqual(self.fake["log"][before:], [])  # nothing pushed, queued or played
+        # The next poll is quiet: the failure is reported once.
+        self.assertFalse(run_bridge("player")["data"]["loadFailed"])
+
     def test_logout_stops_the_player_and_forgets_tokens(self):
         self.login()
         run_bridge("play", EP_1, "--podcast", PODCAST_A)
