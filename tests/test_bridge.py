@@ -18,6 +18,7 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -597,6 +598,27 @@ class EndToEnd(PlayerTestCase):
         self.assertEqual(self.fake["log"][before:], [])  # nothing pushed, queued or played
         # The next poll is quiet: the failure is reported once.
         self.assertFalse(run_bridge("player")["data"]["loadFailed"])
+
+    def test_audio_from_a_host_that_hangs_is_reported_and_the_player_closed(self):
+        # #6's case: the host accepts the connection and then sends nothing.
+        # A listening socket nobody accepts on does exactly that (the kernel
+        # completes the handshake). mpv's network timeout is cut from 30 s to
+        # 1 s on this player so the test doesn't wait half a minute.
+        self.login()
+        run_bridge("play", EP_1, "--podcast", PODCAST_A)
+        self.wait_for(lambda: run_bridge("player")["data"]["position"] > 0.5)
+        silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(silent.close)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        before = len(self.fake["log"])
+        with bridge.Mpv.connect() as player:
+            player.command("set_property", "network-timeout", 1)
+            player.command("loadfile", "http://127.0.0.1:%d/hangs.mp3" % silent.getsockname()[1], "replace")
+        view = self.wait_for(lambda: (lambda v: v if v.get("loadFailed") else None)(run_bridge("player")["data"]))
+        self.assertFalse(view["active"])
+        self.assertFalse(self.mpv_running())
+        self.assertEqual(self.fake["log"][before:], [])  # nothing pushed, queued or played
 
     def test_logout_stops_the_player_and_forgets_tokens(self):
         self.login()
