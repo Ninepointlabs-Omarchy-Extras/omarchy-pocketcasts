@@ -520,14 +520,16 @@ Item {
     onTriggered: root.syncPlayerEvents()
   }
 
-  // ---- Unload when idle. Paused this long, the player is closed: no
-  //      process left behind at all. Its position already reached Pocket
+  // ---- Unload when idle (opt-in). Paused this long, the player is closed:
+  //      no process left behind at all. Its position already reached Pocket
   //      Casts when it paused, and the next play asks Pocket Casts where to
-  //      pick up, whichever device you listened on meanwhile. 0 keeps the
-  //      player loaded until you stop it.
+  //      pick up, whichever device you listened on meanwhile. 0, the
+  //      default, keeps the player loaded until you stop it, so the Play
+  //      media key can always resume it (an unloaded player has no MPRIS
+  //      player for media keys to reach).
   readonly property int unloadAfterMinutes: {
-    var minutes = Number(setting("unloadAfterMinutes", 15))
-    return isNaN(minutes) ? 15 : Math.max(0, Math.round(minutes))
+    var minutes = Number(setting("unloadAfterMinutes", 0))
+    return isNaN(minutes) ? 0 : Math.max(0, Math.round(minutes))
   }
 
   Timer {
