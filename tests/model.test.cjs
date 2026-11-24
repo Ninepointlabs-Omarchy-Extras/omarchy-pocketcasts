@@ -153,6 +153,14 @@ test("nothing runs on a timer while paused or idle; while playing, polls are syn
   assert.match(service, /observe_property/)
 })
 
+test("audio that never loads is reported, on the OSD when no panel is open", () => {
+  const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
+  assert.match(service, /message\.event === "end-file" && message\.reason === "error"/)
+  assert.match(service, /player\.loadFailed === true/)
+  assert.match(service, /shell\.summon\("omarchy\.osd"/)
+  assert.match(service, /if \(!panelOpen && shell/)
+})
+
 test("the password travels on stdin, never in argv, and is cleared after use", () => {
   const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
   const panel = fs.readFileSync(path.join(ROOT, "Panel.qml"), "utf8")

@@ -1170,7 +1170,7 @@ def up_next_remove(uuids):
 # ---------------------------------------------------------------------- mpv
 
 MPV_PROPERTIES = ("path", "pause", "time-pos", "duration", "volume", "speed", "eof-reached",
-                  "idle-active", "paused-for-cache")
+                  "idle-active", "paused-for-cache", "playlist-count")
 
 
 def runtime_dir(create=False):
@@ -1477,7 +1477,7 @@ def play_item(item, prefs, from_start=False, queue=True, save_previous=True, at_
     return state
 
 
-def player_view(snap, state, prefs):
+def player_view(snap, state, prefs, load_failed=False):
     episode = state.get("episode") or {}
     active = bool(snap) and not snap.get("idle-active") and bool(snap.get("path"))
     duration = snap.get("duration") if active else None
@@ -1485,7 +1485,11 @@ def player_view(snap, state, prefs):
     view = {
         "active": active,
         "playing": active and snap.get("pause") is False,
-        "buffering": active and snap.get("paused-for-cache") is True,
+        # Still opening the stream (no position yet) reads as buffering too,
+        # rather than as playing in silence.
+        "buffering": active and (snap.get("paused-for-cache") is True or not isinstance(position, (int, float))),
+        # mpv gave up on the episode: it never opened, or the stream broke.
+        "loadFailed": bool(load_failed),
         "position": float(position) if isinstance(position, (int, float)) else float(state.get("position") or episode.get("playedUpTo") or 0),
         "duration": float(duration) if isinstance(duration, (int, float)) and duration > 0 else float(episode.get("duration") or 0),
         "volume": int(round(snap.get("volume"))) if active and isinstance(snap.get("volume"), (int, float)) else as_int(prefs.get("volume", 100)) if "volume" in prefs else 100,
@@ -1637,8 +1641,19 @@ def poll(autoplay=True):
         snap = player.snapshot()
     episode = state.get("episode") or {}
     url = episode.get("url") or ""
-    if not episode.get("uuid") or (snap.get("path") and snap.get("path") != url):
-        # mpv is playing something this plugin did not load (or nothing).
+    if not snap.get("path"):
+        # Nothing loaded. If mpv still lists an episode, loading it failed
+        # (its server didn't answer, say) or its stream broke: close the
+        # player and say so. Nothing is pushed: whatever played last was
+        # already sent, and an idle player must never resume or switch.
+        if episode.get("uuid") and snap.get("idle-active") is True and as_int(snap.get("playlist-count")) > 0:
+            player = Mpv.connect()
+            if player:
+                quit_mpv(player)
+            return player_view({}, state, prefs, load_failed=True)
+        return player_view(snap, state, prefs)
+    if not episode.get("uuid") or snap.get("path") != url:
+        # mpv is playing something this plugin did not load.
         return player_view(snap, state, prefs)
     position = snap.get("time-pos")
     if isinstance(position, (int, float)):
