@@ -1183,6 +1183,15 @@ def socket_path(create=False):
         return held.entry("mpv.sock")
 
 
+def player_socket():
+    """mpv's socket path for the panel to listen on, or "" when the runtime
+    directory is unusable."""
+    try:
+        return socket_path(create=True)
+    except (OSError, ApiError):
+        return ""
+
+
 def mpris_script():
     """mpv-mpris, when installed, so media keys and playerctl see the player.
     Only a root-owned copy in the system library directory is loaded."""
@@ -1761,6 +1770,10 @@ def cmd_status(args):
         "mpv": trusted_tool("mpv"),
         "mpris": bool(mpris_script()),
         "running": Mpv.connect(timeout=0.5) is not None,
+        # Where the panel listens for mpv's events (pause, seek, end of file)
+        # instead of polling: the same checked private directory the bridge
+        # starts mpv in.
+        "socket": player_socket(),
         "last": chip_item(episode),
         "python": "%d.%d.%d" % sys.version_info[:3],  # for the About page
     })
@@ -1953,6 +1966,13 @@ def cmd_stop(args):
     with StateLock():
         state = load_playback()
         player = Mpv.connect()
+        if player and args.if_paused and player.get("pause") is False:
+            # The panel's idle unload, but something (a media key) resumed
+            # playback since: leave it playing.
+            with player:
+                view = player_view(player.snapshot(), state, load_prefs())
+            out(view)
+            return
         if player:
             sync_now(player, state)
             quit_mpv(player)
@@ -2067,7 +2087,7 @@ def build_parser():
     p = sub.add_parser("volume"); p.add_argument("percent", type=int); p.set_defaults(fn=cmd_volume)
     p = sub.add_parser("speed"); p.add_argument("value"); p.set_defaults(fn=cmd_speed)
     sub.add_parser("next").set_defaults(fn=cmd_next)
-    sub.add_parser("stop").set_defaults(fn=cmd_stop)
+    p = sub.add_parser("stop"); p.add_argument("--if-paused", action="store_true"); p.set_defaults(fn=cmd_stop)
 
     p = sub.add_parser("mark"); p.add_argument("state", choices=("played", "unplayed")); p.add_argument("uuid")
     p.add_argument("--podcast", required=True); p.set_defaults(fn=cmd_mark)

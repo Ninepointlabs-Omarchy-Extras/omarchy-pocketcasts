@@ -54,6 +54,7 @@ Item {
   // ---- Connection state (from `pocketcasts-bridge status`)
   property bool probed: false
   property bool probing: false
+  property double probedAt: 0
   property bool authenticated: false
   property bool needsReauth: false
   property string email: ""
@@ -316,6 +317,8 @@ Item {
       root.email = d.email || ""
       root.mpvInstalled = d.mpv !== ""
       root.mprisInstalled = d.mpris === true
+      root.mpvSocket = typeof d.socket === "string" ? d.socket : ""
+      root.probedAt = Date.now()
       root.lastItem = d.last || {}
       root.pythonVersion = /^[0-9]{1,3}(\.[0-9]{1,3}){1,2}$/.test(String(d.python || "")) ? d.python : ""
       if (root.authenticated || d.running === true) root.refreshPlayer()
@@ -323,8 +326,11 @@ Item {
     })
   }
 
+  // Sign-in state and the last episode are read at startup and again when a
+  // panel opens and that read is over five minutes old; no timer re-reads
+  // them in the background.
   function refreshIfStale() {
-    if (!probed) { refresh(); return }
+    if (!probed || Date.now() - probedAt > staleMs) { refresh(); return }
     refreshPlayer()
     if (authenticated) loadUpNextIfStale()
     else refresh()
@@ -385,13 +391,19 @@ Item {
 
   // ------------------------------------------------------------- player --
 
+  // A poll that arrives while one is running is not dropped: it runs again
+  // once the first answers, so the last event always gets a fresh read.
+  property bool _pollAgain: false
+
   function refreshPlayer() {
-    if (!active || playerLoading) return
+    if (!active) return
+    if (playerLoading) { _pollAgain = true; return }
     playerLoading = true
     var args = ["player"]
     if (!autoplay) args.push("--no-autoplay")
     call(args, function(result) {
       root.playerLoading = false
+      if (root._pollAgain) { root._pollAgain = false; root.settle() }
       if (!result.ok) {
         if (root.absorbAuthError(result)) return
         root.playerError = result.error
@@ -415,31 +427,125 @@ Item {
       inProgressLoadedAt = 0
       if (panelOpen) loadUpNext()
     }
+    syncPlayerEvents()
   }
 
-  // Interpolate the position between polls so the slider moves every second.
+  // Where playback is now: the last read from mpv, carried forward by the
+  // clock while playing.
+  function livePosition() {
+    var position = Number(player.position) || 0
+    if (isPlaying && !buffering) position += (Date.now() - playerFetchedAt) / 1000 * speed
+    return duration > 0 ? Math.min(position, duration) : position
+  }
+
+  // Move the panel's slider every second; with no panel open nothing shows
+  // the position, so nothing ticks.
   Timer {
     interval: 1000
     repeat: true
-    running: root.isPlaying && !root.buffering
-    onTriggered: {
-      var elapsed = (Date.now() - root.playerFetchedAt) / 1000 * root.speed
-      var next = (Number(root.player.position) || 0) + elapsed
-      root.localPosition = root.duration > 0 ? Math.min(next, root.duration) : next
-      // At the end: the bridge marks it played and moves on; ask soon.
-      if (root.duration > 0 && next >= root.duration - 0.5) settleTimer.restart()
-    }
+    running: root.isPlaying && !root.buffering && root.panelOpen
+    onTriggered: root.localPosition = root.livePosition()
   }
 
-  // Poll cadence: brisk while a panel is open, steady while playing (the
-  // bridge pushes the position to Pocket Casts from these polls and notices
-  // the end of an episode), sleepy when nothing is playing.
+  // ---- Polling. Nothing here runs on a timer except, while playing, one
+  //      poll every half minute: each one pushes the position to Pocket Casts
+  //      (the bridge's SYNC_INTERVAL, 30 s; the extra 2 s make every poll
+  //      due). Everything else the panel needs to know (a pause or resume,
+  //      from here or a media key; a seek; the end of an episode; the player
+  //      quitting) arrives as an mpv event on `playerEvents` and triggers one
+  //      poll. Paused or idle, no process is started at all.
   Timer {
     id: pollTimer
-    interval: root.panelOpen ? 3000 : (root.isPlaying ? 5000 : 60000)
+    interval: 32000
     repeat: true
-    running: root.active && (root.authenticated || root.playerActive)
+    running: root.active && root.isPlaying
     onTriggered: root.refreshPlayer()
+  }
+
+  // The bridge reports mpv's socket in `status`; a poll reports whether mpv
+  // is running. Listen whenever both hold.
+  property string mpvSocket: ""
+  property int _eventAttempts: 0
+  readonly property bool wantPlayerEvents: active && mpvSocket !== "" && player && player.running === true
+  onWantPlayerEventsChanged: { _eventAttempts = 0; syncPlayerEvents() }
+
+  function syncPlayerEvents() {
+    if (!wantPlayerEvents) {
+      if (playerEvents.connected) playerEvents.connected = false
+      return
+    }
+    // A socket that keeps refusing (or hanging up before saying anything)
+    // gets three tries per player, not a loop of polls.
+    if (playerEvents.connected || _eventAttempts >= 3) return
+    _eventAttempts++
+    playerEvents.connected = true
+  }
+
+  function observePlayer() {
+    var names = ["pause", "eof-reached", "path", "idle-active"]
+    for (var i = 0; i < names.length; i++)
+      playerEvents.write(JSON.stringify({ command: ["observe_property", i + 1, names[i]] }) + "\n")
+    playerEvents.flush()
+  }
+
+  function playerEvent(line) {
+    var message = null
+    try { message = JSON.parse(line) } catch (e) { return }
+    if (!message || typeof message !== "object") return
+    _eventAttempts = 0  // it talks: this connection works
+    // property-change: one of the observed properties (its first value
+    // arrives right after observe_property). playback-restart: a seek (from
+    // here, a media widget or playerctl) or a new file has settled.
+    if (message.event === "property-change" || message.event === "playback-restart") settle()
+  }
+
+  Socket {
+    id: playerEvents
+    path: root.mpvSocket
+    parser: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) { root.playerEvent(line) }
+    }
+    onConnectionStateChanged: {
+      if (connected) root.observePlayer()
+      else root.settle()  // mpv went away (stopped, unloaded, crashed): read where things stand
+    }
+    onError: eventRetry.restart()
+  }
+
+  Timer {
+    id: eventRetry
+    interval: 1000
+    repeat: false
+    onTriggered: root.syncPlayerEvents()
+  }
+
+  // ---- Unload when idle (opt-in). Paused this long, the player is closed:
+  //      no process left behind at all. Its position already reached Pocket
+  //      Casts when it paused, and the next play asks Pocket Casts where to
+  //      pick up, whichever device you listened on meanwhile. 0, the
+  //      default, keeps the player loaded until you stop it, so the Play
+  //      media key can always resume it (an unloaded player has no MPRIS
+  //      player for media keys to reach).
+  readonly property int unloadAfterMinutes: {
+    var minutes = Number(setting("unloadAfterMinutes", 0))
+    return isNaN(minutes) ? 0 : Math.max(0, Math.round(minutes))
+  }
+
+  Timer {
+    id: unloadTimer
+    interval: Math.max(1, root.unloadAfterMinutes) * 60000
+    repeat: false
+    running: root.active && root.unloadAfterMinutes > 0 && root.playerActive && !root.isPlaying
+    onTriggered: root.unloadPlayer()
+  }
+
+  function unloadPlayer() {
+    // --if-paused: should anything have resumed it since (a media key whose
+    // event was missed), the bridge leaves it playing.
+    call(["stop", "--if-paused"], function(result) {
+      if (result.ok && result.data && result.data.active !== undefined) root.applyPlayer(result.data)
+    })
   }
 
   Timer {
@@ -481,10 +587,10 @@ Item {
   function playPause() {
     if (!authenticated && !playerActive) return false
     if (isPlaying) {
-      optimistic({ playing: false, position: localPosition })
+      optimistic({ playing: false, position: livePosition() })
       action(["pause"])
     } else {
-      if (playerActive) optimistic({ playing: true, position: localPosition })
+      if (playerActive) optimistic({ playing: true, position: livePosition() })
       action(["resume"])
     }
     return true
@@ -510,7 +616,7 @@ Item {
 
   function skip(delta) {
     if (!playerActive) return false
-    var target = Math.max(0, localPosition + delta)
+    var target = Math.max(0, livePosition() + delta)
     if (duration > 0) target = Math.min(target, duration - 1)
     optimistic({ position: target })
     localPosition = target
@@ -697,20 +803,13 @@ Item {
         playing: root.isPlaying,
         title: root.nowItem ? root.nowItem.name : "",
         show: root.nowItem ? root.nowItem.show : "",
-        position: Math.round(root.localPosition),
+        position: Math.round(root.livePosition()),
         duration: Math.round(root.duration),
         speed: root.speed
       })
     }
   }
 
-  Timer {
-    interval: 300000
-    repeat: true
-    running: root.active
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
-
+  Component.onCompleted: if (active && !probed) refresh()
   onActiveChanged: if (active && !probed) refresh()
 }

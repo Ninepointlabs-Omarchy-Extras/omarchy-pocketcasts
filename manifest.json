@@ -33,7 +33,8 @@
       "defaultTab": "upnext",
       "skipBack": 10,
       "skipForward": 30,
-      "autoplay": true
+      "autoplay": true,
+      "unloadAfterMinutes": 0
     },
     "schema": [
       {
@@ -86,6 +87,15 @@
         "type": "boolean",
         "label": "Play the next Up Next episode when one finishes",
         "defaultValue": true
+      },
+      {
+        "key": "unloadAfterMinutes",
+        "type": "integer",
+        "label": "Close the player after this many minutes paused (0 = never)",
+        "min": 0,
+        "max": 240,
+        "step": 5,
+        "defaultValue": 0
       }
     ]
   }
