@@ -77,6 +77,14 @@ Casts every 30 seconds, and again when you pause, stop or switch episodes.
 A finished episode is marked as played. If autoplay is on, the next Up Next
 episode starts after that.
 
+Before a paused episode plays again (from the panel, a media key or
+`playerctl`, or when the machine wakes up mid-episode), the plugin asks
+Pocket Casts where you are. If you listened on in another device meanwhile,
+it picks up from there: later in the same episode, or whatever is now at the
+top of Up Next if that device finished this one or started another. A paused
+position that hasn't moved is never sent again, so pausing, stopping or
+switching episodes here can't rewind your phone.
+
 **About:** the 󰋽 button at the top of the panel (or `i` in the panel, or
 `omarchy-shell ninepointlabs.pocketcasts about`) shows the version, the
 license (readable in place), Nine Point Labs, what the plugin does with your
